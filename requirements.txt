@@ -1,0 +1,11 @@
+# Notebook packages for A5 (vLLM is installed separately by install_vllm.sh)
+graphrag>=3.2
+lightrag-hku>=1.5
+neo4j>=5.20
+langchain-neo4j
+langchain-openai
+langchain-text-splitters
+networkx
+pyvis
+rank_bm25
+pyyaml

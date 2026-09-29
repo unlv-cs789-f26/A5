@@ -1,0 +1,564 @@
+# CS 789 Progressive RAG Lab - evaluation question set
+#
+# Schema (one mapping per list entry):
+#   id            str   stable identifier, referenced in results/<stage>.json
+#   question      str   the question put to the pipeline
+#   type          str   single_hop | multi_hop | aggregation | temporal | negation | lexical
+#   hops          int   number of documents that must be joined to answer (1 for negation)
+#   gold_answer   str   short canonical answer, for human reading and for eyeballing output
+#   gold_facts    list  atomic strings an answer must contain; scored by lib.metrics.fact_coverage.
+#                       INVARIANT (asserted by selftest.py): every gold_fact appears verbatim,
+#                       after normalisation, in at least one of this question's gold_doc_ids.
+#                       For type: negation this list MUST be empty - there is nothing to recall.
+#   gold_doc_ids  list  front-matter ids of the documents carrying the evidence; the relevance
+#                       judgements for recall@k / precision@k / MRR / nDCG@k. May be empty for a
+#                       negation question whose answer is simply absent from the corpus.
+#   notes         str   why the question is hard and which stage should first get it right
+#
+# Stage names used in `notes` follow the lab progression:
+#   stage1 naive fixed-chunk dense retrieval
+#   stage2 better chunking / more context
+#   stage3 hybrid lexical + dense (BM25 fusion)
+#   stage4 reranking and query rewriting
+#   stage5 knowledge-graph augmented retrieval
+#   stage6 hybrid vector + graph with multi-hop traversal
+
+questions:
+
+  # ---------------------------------------------------------------- single_hop
+  - id: SH-01
+    question: Who is the primary owner of the workstation VAN-WKS-4471?
+    type: single_hop
+    hops: 1
+    gold_answer: Marcus Delgado, Senior Financial Analyst in Finance.
+    gold_facts:
+      - Marcus Delgado
+      - VAN-WKS-4471
+    gold_doc_ids: [asset-inventory-v2]
+    notes: >-
+      Baseline sanity check. The host identifier and the owner name sit in the same table row,
+      so any chunker that does not split the table mid-row will retrieve it. Expected to pass
+      from stage1. If this fails, the chunk size is wrong, not the retriever.
+
+  - id: SH-02
+    question: Which CVE identifier is described by vendor advisory APERTURE-SA-2026-014?
+    type: single_hop
+    hops: 1
+    gold_answer: CVE-2026-3117, a pre-authentication RCE in Aperture SecureEdge VPN.
+    gold_facts:
+      - CVE-2026-3117
+      - Aperture SecureEdge VPN
+    gold_doc_ids: [advisory-aperture-sa-2026-014]
+    notes: >-
+      Single-chunk lookup, but the corpus deliberately contains a second, near-identically
+      numbered advisory. Stage1 usually gets this; watch whether it cites the Kestrel advisory
+      instead, which is the same failure mode as LEX-02 in an easier setting.
+
+  - id: SH-03
+    question: How much data was exfiltrated from Vandelay during the campaign, and from which host?
+    type: single_hop
+    hops: 1
+    gold_answer: 1.4 GB, from the corporate file server VAN-SRV-FILE03.
+    gold_facts:
+      - 1.4 GB
+      - VAN-SRV-FILE03
+    gold_doc_ids: [inc-2026-048]
+    notes: >-
+      Both facts are in the summary paragraph of one ticket. Expected from stage1. Included as
+      a control so that a stage regressing on the easy questions is visible in the report.
+
+  - id: SH-04
+    question: Which directory group grants read/write access to the Meridian Payroll DB?
+    type: single_hop
+    hops: 1
+    gold_answer: GRP-FIN-PAYROLL-RW, read/write on 1433/tcp to VAN-SRV-DB07.
+    gold_facts:
+      - GRP-FIN-PAYROLL-RW
+      - Meridian Payroll DB
+      - read/write
+    gold_doc_ids: [access-review-q1]
+    notes: >-
+      One hop, but the answer lives in a markdown table plus a numbered finding. Fixed-size
+      chunking often severs the table header from the row, leaving the retriever with an
+      anonymous row of pipes. Structural chunking (stage2) makes this reliable.
+
+  - id: SH-05
+    question: What beacon interval was observed in INC-2026-044?
+    type: single_hop
+    hops: 1
+    gold_answer: 293 seconds, with roughly seven percent jitter.
+    gold_facts:
+      - 293 seconds
+    gold_doc_ids: [inc-2026-044]
+    notes: >-
+      Easy semantically, but the number 293 also appears in three other documents. Tests that
+      the pipeline cites the ticket rather than the malware report; scoring only checks the
+      number, so this one is about retrieval precision, not answer text.
+
+  # ----------------------------------------------------------------- multi_hop
+  - id: MH-01
+    question: >-
+      On the workstation where the INC-2026-041 payload actually executed, what Restricted
+      system could that workstation's owner reach through their directory group, and with
+      what level of access?
+    type: multi_hop
+    hops: 4
+    gold_answer: >-
+      The Meridian Payroll DB on VAN-SRV-DB07, with read/write access, via GRP-FIN-PAYROLL-RW
+      (the group holding the workstation's owner, Marcus Delgado).
+    gold_facts:
+      - VAN-WKS-4471
+      - Marcus Delgado
+      - GRP-FIN-PAYROLL-RW
+      - Meridian Payroll DB
+      - VAN-SRV-DB07
+      - read/write
+    gold_doc_ids:
+      - inc-2026-041
+      - asset-inventory-v2
+      - iam-group-membership
+      - access-review-q1
+    notes: >-
+      The flagship chain: alert names a host, inventory maps host to owner, IAM export maps
+      owner to group, access review maps group to system. Four documents, three joins, and no
+      single document contains two adjacent links. Dense retrieval returns the incident and
+      possibly the access review, never the middle two, because the query shares no vocabulary
+      with them. Expected to fail through stage4 and to first succeed at stage5/stage6, where
+      the graph supplies the joins. Note the corpus states the join is never made by hand
+      (pir-inc-2026-041), so a pipeline that answers from the PIR alone is cheating.
+
+  - id: MH-02
+    question: >-
+      Which Vandelay asset was exposed to SILVER TAMARIN's exploit-based initial access route
+      in February 2026, and what software version was it running at the time?
+    type: multi_hop
+    hops: 4
+    gold_answer: VAN-SRV-VPN01, running Aperture SecureEdge VPN 7.2.1 (inside the CVE-2026-3117 affected range).
+    gold_facts:
+      - CVE-2026-3117
+      - VAN-SRV-VPN01
+      - Aperture SecureEdge VPN 7.2.1
+    gold_doc_ids:
+      - ti-silver-tamarin
+      - advisory-aperture-sa-2026-014
+      - asset-inventory-v1
+    notes: >-
+      Threat intel names the technique and the CVE; the advisory gives the affected range; the
+      February inventory revision gives the running version. The trap is that the current
+      inventory revision says 7.2.6, so a pipeline that ignores the "in February 2026" qualifier
+      retrieves the wrong revision. Hybrid retrieval (stage3) finds the CVE token; correct
+      version selection needs stage4 query rewriting or stage6 graph traversal with dates.
+
+  - id: MH-03
+    question: Which threat actor was behind the command-and-control beaconing in INC-2026-044, and what is their assessed motivation?
+    type: multi_hop
+    hops: 3
+    gold_answer: SILVER TAMARIN, assessed as a financially motivated criminal intrusion set.
+    gold_facts:
+      - 198.51.100.77
+      - SILVER TAMARIN
+      - financially motivated
+    gold_doc_ids:
+      - inc-2026-044
+      - ti-infrastructure
+      - ti-silver-tamarin
+    notes: >-
+      The incident ticket deliberately refuses to attribute; it records the address and points
+      at the intelligence holdings. The pivot is the literal IP string, which dense embeddings
+      represent poorly. Stage3 hybrid retrieval usually closes the first hop; the second hop to
+      the motivation assessment needs stage5 or a second retrieval round in stage4.
+
+  - id: MH-04
+    question: Why was the domain account dwhitfield still able to authenticate to the build server on 2026-03-14?
+    type: multi_hop
+    hops: 4
+    gold_answer: >-
+      The engagement ended 2026-03-06 but offboarding change CHG-2026-0884 was never executed,
+      so the account stayed enabled and kept its GRP-ENG-BUILD membership.
+    gold_facts:
+      - dwhitfield
+      - "2026-03-06"
+      - CHG-2026-0884
+      - never executed
+      - GRP-ENG-BUILD
+    gold_doc_ids:
+      - inc-2026-047
+      - hr-offboarding-notice
+      - chg-2026-0884
+      - iam-group-membership
+    notes: >-
+      Incident to HR notice to change record to group membership. The boring HR and change
+      documents carry the load and are the least semantically similar to a security question,
+      so they rank last under pure dense retrieval. First reliably answered at stage5.
+
+  - id: MH-05
+    question: Why did the Meridian Payroll DB start receiving connections from the administrative jump host in March 2026?
+    type: multi_hop
+    hops: 3
+    gold_answer: >-
+      A fatal KES-5521 scheduler error on 2026-03-07 forced the payroll reconciliation job to be
+      relocated from the HRIS server to VAN-SRV-JMP01, which is what INC-2026-046 observed.
+    gold_facts:
+      - KES-5521
+      - VAN-SRV-JMP01
+      - reconciliation job
+      - svc_payroll_sync
+    gold_doc_ids:
+      - hris-error-log-20260307
+      - inc-2026-046
+    notes: >-
+      Causal chain crossing a document-type boundary: an application error log explains a
+      security observation. The error log never uses the word "security" and the incident never
+      uses the error code, so the two chunks share almost no vocabulary. Stage6 graph traversal
+      over a shared host node is the clean solution.
+
+  - id: MH-06
+    question: What malware family is the file svcmon.exe, and which threat actor is known to use it?
+    type: multi_hop
+    hops: 3
+    gold_answer: Lorenzo Loader, used exclusively by SILVER TAMARIN in current reporting.
+    gold_facts:
+      - svcmon.exe
+      - Lorenzo Loader
+      - SILVER TAMARIN
+    gold_doc_ids:
+      - malware-analysis-lorenzo-loader
+      - ti-silver-tamarin
+    notes: >-
+      Two hops with a strong lexical anchor, so hybrid retrieval at stage3 usually gets it. Kept
+      as the multi-hop question that should improve earliest, giving the progression chart a
+      curve rather than a step.
+
+  - id: MH-07
+    question: Where did the archive staged during INC-2026-045 eventually go, and how long after it was staged?
+    type: multi_hop
+    hops: 3
+    gold_answer: >-
+      Uploaded to storage.driftbox-cdn.example.com on 2026-03-21, sixteen days after it was staged.
+    gold_facts:
+      - stage01.7z
+      - sixteen days
+      - storage.driftbox-cdn.example.com
+    gold_doc_ids:
+      - inc-2026-045
+      - inc-2026-048
+      - proxy-log-20260321
+    notes: >-
+      Two incidents plus a proxy log. The destination hostname appears only in the log and in
+      one line of the exfiltration ticket. The temporal part ("sixteen days") is stated in the
+      staging ticket, so an answer built only from the exfiltration ticket scores partial. Good
+      discriminator between stage3 and stage4.
+
+  - id: MH-08
+    question: Which two independent control failures both had to be present for the session recorded in INC-2026-047 to happen?
+    type: multi_hop
+    hops: 4
+    gold_answer: >-
+      An un-executed offboarding change (CHG-2026-0884) that left the account enabled, and the
+      never-expiring GRP-VPN-CONTRACTOR exception in Finding AR-02 that lets contractor VPN
+      sessions reach SEG-ENG.
+    gold_facts:
+      - CHG-2026-0884
+      - GRP-VPN-CONTRACTOR
+      - Finding AR-02
+      - SEG-ENG
+    gold_doc_ids:
+      - inc-2026-047
+      - chg-2026-0884
+      - access-review-q1
+      - network-segments
+    notes: >-
+      Requires assembling an identity failure and a network failure that are documented in
+      completely different places and never mentioned together. The incident ticket says two
+      controls would each have prevented it but names neither precisely. Expected first at
+      stage6.
+
+  - id: MH-09
+    question: Why did the authentication attempt against VAN-SRV-DB07 on 2026-03-14 fail?
+    type: multi_hop
+    hops: 3
+    gold_answer: >-
+      For two independent reasons: dwhitfield is not a member of GRP-FIN-PAYROLL-RW, and the
+      segmentation model does not permit SEG-CORP to reach SEG-FIN-CORE.
+    gold_facts:
+      - "0xC000006D"
+      - GRP-FIN-PAYROLL-RW
+      - SEG-CORP
+      - SEG-FIN-CORE
+    gold_doc_ids:
+      - auth-log-20260314
+      - iam-group-membership
+      - network-segments
+    notes: >-
+      A negative-result question that is nonetheless answerable, which distinguishes it from the
+      NEG questions. The log gives a status code, not a reason; the reason needs the IAM export
+      and the segmentation model. Tests that abstention logic does not over-trigger.
+
+  - id: MH-10
+    question: >-
+      How did the credential-dumping tool reach VAN-WKS-2210, and which change record failed to
+      close that path?
+    type: multi_hop
+    hops: 3
+    gold_answer: >-
+      Over 22/tcp from SEG-CORP into SEG-ENG under the temporary firewall exception on the build
+      server; CHG-2026-0896 proposed removing the exception and was rejected.
+    gold_facts:
+      - VAN-WKS-2210
+      - 22/tcp
+      - SEG-CORP
+      - CHG-2026-0896
+      - rejected
+    gold_doc_ids:
+      - inc-2026-043
+      - asset-inventory-v2
+      - change-log-march
+    notes: >-
+      Incident to firewall exception to change record. The change log is a table of one-line
+      rows, which chunkers mangle and embeddings flatten. Stage3 helps via the CHG token; the
+      "rejected" outcome and its reason need stage4 or later.
+
+  # --------------------------------------------------------------- aggregation
+  - id: AGG-01
+    question: >-
+      Which MITRE ATT&CK technique IDs appear in the "Techniques observed" sections of incident
+      tickets INC-2026-041 through INC-2026-048?
+    type: aggregation
+    hops: 8
+    gold_answer: >-
+      Twelve: T1566.001, T1059.001, T1552.001, T1190, T1003.001, T1105, T1547.001, T1071.001,
+      T1053.005, T1078.002, T1021.001, T1567.002.
+    gold_facts:
+      - T1566.001
+      - T1059.001
+      - T1552.001
+      - T1190
+      - T1003.001
+      - T1105
+      - T1547.001
+      - T1071.001
+      - T1053.005
+      - T1078.002
+      - T1021.001
+      - T1567.002
+    gold_doc_ids:
+      - inc-2026-041
+      - inc-2026-042
+      - inc-2026-043
+      - inc-2026-044
+      - inc-2026-045
+      - inc-2026-046
+      - inc-2026-047
+      - inc-2026-048
+    notes: >-
+      Eight documents must all be retrieved; any top-k below eight guarantees partial credit at
+      best. The trap is the SILVER TAMARIN intel report, which lists eleven of the twelve in a
+      single chunk and is by far the strongest single match: a pipeline that answers from it
+      alone will look almost right and will silently omit T1105. Fact coverage is the right
+      metric here. Stage6 with graph enumeration over incident nodes is the intended solution.
+
+  - id: AGG-02
+    question: Which incident tickets from the campaign carry a Critical severity, and how many are there?
+    type: aggregation
+    hops: 8
+    gold_answer: Three - INC-2026-041 (after its re-rating), INC-2026-045 and INC-2026-048.
+    gold_facts:
+      - INC-2026-041
+      - INC-2026-045
+      - INC-2026-048
+      - Three of them carry a Critical rating
+    gold_doc_ids:
+      - inc-2026-041
+      - inc-2026-045
+      - inc-2026-048
+      - pir-campaign-march
+    notes: >-
+      Aggregation crossed with staleness. INC-2026-041 shows "Initial severity: Medium" in the
+      same header block as "Final severity: Critical"; a chunk that captures only the first line
+      loses the ticket from the answer. The campaign review states the count of three but
+      describes the three tickets narratively rather than by identifier, so the count and the
+      identifiers must come from different places.
+
+  - id: AGG-03
+    question: How many distinct hosts appear as affected hosts across INC-2026-041 through INC-2026-048, and which are they?
+    type: aggregation
+    hops: 8
+    gold_answer: >-
+      Eight - VAN-WKS-4471, VAN-WKS-2210, VAN-SRV-VPN01, VAN-SRV-FILE03, VAN-SRV-DB07,
+      VAN-SRV-JMP01, VAN-SRV-BLD02, VAN-LAP-0912.
+    gold_facts:
+      - VAN-WKS-4471
+      - VAN-WKS-2210
+      - VAN-SRV-VPN01
+      - VAN-SRV-FILE03
+      - VAN-SRV-DB07
+      - VAN-SRV-JMP01
+      - VAN-SRV-BLD02
+      - VAN-LAP-0912
+    gold_doc_ids:
+      - inc-2026-041
+      - inc-2026-042
+      - inc-2026-043
+      - inc-2026-044
+      - inc-2026-045
+      - inc-2026-046
+      - inc-2026-047
+      - inc-2026-048
+    notes: >-
+      No document anywhere in the corpus states this list, so it cannot be retrieved, only
+      assembled. Hosts repeat across tickets, so deduplication is part of the task. The
+      inventory lists nine hosts and is a tempting wrong answer; VAN-SRV-APP12 is in the
+      inventory but never named as an affected host. Only stage6 graph enumeration gets this
+      cleanly.
+
+  # ------------------------------------------------------------------ temporal
+  - id: TMP-01
+    question: What version of Aperture SecureEdge VPN is VAN-SRV-VPN01 running according to the current asset inventory?
+    type: temporal
+    hops: 2
+    gold_answer: Aperture SecureEdge VPN 7.2.6, upgraded from 7.2.1 on 2026-03-12 under CHG-2026-0891.
+    gold_facts:
+      - Aperture SecureEdge VPN 7.2.6
+      - "2026-03-12"
+      - CHG-2026-0891
+    gold_doc_ids:
+      - asset-inventory-v2
+      - chg-2026-0891
+    notes: >-
+      The staleness question. Revision 1 of the inventory is a near-identical document that says
+      7.2.1 and is an equally strong embedding match; only its front matter marks it superseded.
+      Any stage that ignores document metadata has a coin-flip chance. Stage2 can fix it with
+      metadata-aware chunking; stage4 reranking on recency is the more general answer.
+
+  - id: TMP-02
+    question: What is the final severity of INC-2026-041, and when and why did it change?
+    type: temporal
+    hops: 2
+    gold_answer: >-
+      Critical. Raised from Medium to Critical on 2026-03-05, after the post-incident review
+      linked the credentials stolen in February to the lateral movement in INC-2026-045.
+    gold_facts:
+      - Medium to Critical
+      - "2026-03-05"
+      - INC-2026-045
+    gold_doc_ids:
+      - inc-2026-041
+      - pir-inc-2026-041
+    notes: >-
+      The answer changed over time inside a single document. A chunk from the ticket header says
+      Medium; a chunk from the analyst notes says Critical. Retrieving one and not the other
+      produces a confidently wrong answer. Sentence or structural chunking (stage2) plus
+      reranking (stage4) is where this becomes reliable.
+
+  - id: TMP-03
+    question: Was VAN-SRV-VPN01 vulnerable to CVE-2026-3117 on 2026-02-19, and was it still vulnerable on 2026-03-16?
+    type: temporal
+    hops: 3
+    gold_answer: >-
+      Yes on 2026-02-19 (running 7.2.1, inside the affected range); no on 2026-03-16 (running 7.2.6).
+    gold_facts:
+      - Aperture SecureEdge VPN 7.2.1
+      - 7.2.4 and later are not affected
+      - Aperture SecureEdge VPN 7.2.6
+    gold_doc_ids:
+      - inc-2026-042
+      - advisory-aperture-sa-2026-014
+      - asset-inventory-v2
+    notes: >-
+      Two point-in-time answers to one question, requiring the affected-version range as the
+      middle term. Retrieval must return evidence for both dates, which top-k dense retrieval
+      rarely does because the two are near-duplicates competing for the same slot. Stage4
+      diversity-aware reranking or stage6 traversal.
+
+  # ------------------------------------------------------------------ negation
+  - id: NEG-01
+    question: Who is Vandelay Industries' cyber-insurance provider?
+    type: negation
+    hops: 1
+    gold_answer: Not stated anywhere in the corpus.
+    gold_facts: []
+    gold_doc_ids: []
+    notes: >-
+      Nothing in the corpus mentions insurance at all, so every retrieved chunk is irrelevant by
+      construction. Scored by lib.metrics.abstention_correct: an answer that says it does not
+      know scores 1, an answer that names anything scores 0. Retrieval will happily return the
+      supplier framework agreement text from the onboarding record, which is about a consulting
+      contract, and a weak LLM will confabulate from it. Expected to be wrong at stage1 and to
+      improve only when the prompt and the reranker together give the model permission to
+      abstain, typically stage4.
+
+  - id: NEG-02
+    question: Which Vandelay employee was identified as an insider collaborating with SILVER TAMARIN?
+    type: negation
+    hops: 1
+    gold_answer: >-
+      None. The corpus identifies no insider; INC-2026-047 explicitly states that Vandelay has not
+      established whether Dana Whitfield used the account or whether the credentials were held by
+      a third party.
+    gold_facts: []
+    gold_doc_ids: [inc-2026-047]
+    notes: >-
+      A presupposition trap rather than an absence. Retrieval works perfectly and returns the
+      contractor incident; the failure is in generation, because every strong lexical signal
+      points at one named person whom the corpus explicitly declines to accuse. Unlike NEG-01
+      this has a gold document, so retrieval metrics stay meaningful while the answer must still
+      abstain. Expect stage1 through stage3 to name Dana Whitfield.
+
+  # ------------------------------------------------------------------- lexical
+  - id: LEX-01
+    question: Which file has SHA-256 3b1f7c9a4e0d2a6b8f5c1d3e7a9b0c2d4e6f8a1b3c5d7e9f0a2b4c6d8e0f1a35?
+    type: lexical
+    hops: 2
+    gold_answer: svcmon.exe, a Lorenzo Loader sample recovered from VAN-WKS-2210.
+    gold_facts:
+      - 3b1f7c9a4e0d2a6b8f5c1d3e7a9b0c2d4e6f8a1b3c5d7e9f0a2b4c6d8e0f1a35
+      - svcmon.exe
+      - Lorenzo Loader
+    gold_doc_ids:
+      - malware-analysis-lorenzo-loader
+      - ti-infrastructure
+      - edr-alert-export-20260224
+    notes: >-
+      The pure lexical trap. A 64-character hex string carries no semantics; embedding it
+      produces a vector close to every other hex string in the corpus, and the corpus contains a
+      second SHA-256 for a different file. Dense retrieval at stage1 and stage2 fumbles this and
+      frequently returns the spreadsheet hash instead. BM25 fusion at stage3 fixes it outright,
+      which makes this the cleanest single demonstration of why hybrid retrieval exists.
+
+  - id: LEX-02
+    question: Which product and version range are affected by CVE-2026-3171?
+    type: lexical
+    hops: 2
+    gold_answer: Kestrel HRIS, versions 9.0.0 through 9.4.3 inclusive.
+    gold_facts:
+      - CVE-2026-3171
+      - Kestrel HRIS
+      - 9.0.0 through 9.4.3
+    gold_doc_ids:
+      - advisory-kestrel-sa-2026-007
+      - cve-2026-3171-writeup
+    notes: >-
+      Two CVE identifiers in the corpus differ by a digit transposition, and the more famous of
+      the two (CVE-2026-3117) dominates the corpus by frequency and by semantic weight. Dense
+      retrieval reliably returns the wrong advisory. Exact-token matching at stage3 is the fix;
+      note that a naive tokeniser that strips punctuation will merge the two identifiers, so this
+      question also tests the tokeniser.
+
+  - id: LEX-03
+    question: What is error code KES-5521, and what action did it trigger?
+    type: lexical
+    hops: 1
+    gold_answer: >-
+      A fatal Kestrel HRIS scheduler error that aborted the nightly payroll reconciliation job;
+      the remediation was to relocate the job to VAN-SRV-JMP01.
+    gold_facts:
+      - KES-5521
+      - VAN-SRV-JMP01
+      - reconciliation job
+    gold_doc_ids: [hris-error-log-20260307]
+    notes: >-
+      One hop, but only for a retriever that can match an opaque identifier. The document never
+      uses the phrase "payroll job failure" and contains four other KES- codes that are lexically
+      adjacent, so both dense retrieval and a sloppy lexical match land on the wrong line.
+      Stage3 fixes retrieval; the second half of the answer needs the whole document, so chunk
+      size matters too.

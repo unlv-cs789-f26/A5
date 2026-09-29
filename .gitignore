@@ -1,0 +1,12 @@
+instructor/
+results/
+vllm-env/
+.venv/
+chroma_db/
+__pycache__/
+*.log
+*.docx
+*.pdf
+.ipynb_checkpoints/
+gr_security/
+lightrag_store/
